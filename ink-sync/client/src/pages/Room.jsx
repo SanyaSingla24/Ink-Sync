@@ -20,13 +20,14 @@ import AIPromptBox from '../components/canvas/AIPromptBox';
 import { TEMPLATES } from '../utils/templates';
 import { generateId } from '../utils/drawingUtils';
 import { exportBoard } from '../utils/canvasUtils';
-import { generateDiagram } from '../utils/aiGenerator';
+import { generateAIDiagram } from '../services/aiService'; // <-- Real AI import
 
 const Room = () => {
   const { roomId } = useParams();
   const navigate = useNavigate();
   const { user } = useAuth();
 
+  const [isAIGenerating, setIsAIGenerating] = useState(false);
   const [room, setRoom] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -36,7 +37,7 @@ const Room = () => {
   const [showChat, setShowChat] = useState(false);
   const [showTemplates, setShowTemplates] = useState(false);
   const [showExportMenu, setShowExportMenu] = useState(false);
-  const [showAIPrompt, setShowAIPrompt] = useState(false); // <-- Added
+  const [showAIPrompt, setShowAIPrompt] = useState(false);
 
   const sendRef = useRef({});
   const canvasRef = useRef(null);
@@ -177,19 +178,54 @@ const Room = () => {
     reader.readAsText(file);
   };
 
-  // ---------- AI GENERATION FUNCTION ----------
-  const handleAIGenerate = (prompt) => {
-    const cam = canvasHook.getCamera();
-    const centerX = (window.innerWidth / 2 - cam.x) / cam.zoom;
-    const centerY = ((window.innerHeight - 56) / 2 - cam.y) / cam.zoom;
+  // ---------- REAL AI GENERATION FUNCTION ----------
+  const handleAIGenerate = async (prompt) => {
+    if (isBoardLocked && !isCreator) {
+      alert('The whiteboard is currently locked by the room creator.');
+      return;
+    }
 
-    const newOperations = generateDiagram(prompt, centerX, centerY, currentUserId, roomId);
+    setIsAIGenerating(true);
+    try {
+      // 1. Get operations from the Gemini AI backend
+      const aiOperations = await generateAIDiagram(prompt);
 
-    newOperations.forEach((op) => {
-      sendRef.current.operation?.(op);
-    });
+      if (!Array.isArray(aiOperations) || aiOperations.length === 0) {
+        throw new Error('AI did not return any diagram elements. Please try a different prompt.');
+      }
 
-    setShowAIPrompt(false);
+      // 2. Calculate center of screen
+      const cam = canvasHook.getCamera();
+      const centerX = (window.innerWidth / 2 - cam.x) / (cam.zoom || 1);
+      const centerY = ((window.innerHeight - 56) / 2 - cam.y) / (cam.zoom || 1);
+
+      // 3. Offset and emit each operation to the room
+      aiOperations.forEach((op) => {
+        const offsetPoints = (op.points || []).map((p) => ({
+          x: (Number(p.x) || 0) + centerX,
+          y: (Number(p.y) || 0) + centerY,
+        }));
+
+        sendRef.current.operation?.({
+          lineWidth: 2,
+          fontSize: 14,
+          ...op,
+          points: offsetPoints,
+          operationId: generateId(),
+          userId: currentUserId,
+          roomId: roomId,
+          timestamp: Date.now(),
+        });
+      });
+
+      setShowAIPrompt(false);
+    } catch (err) {
+      console.error('AI Generation Error:', err);
+      const message = err.response?.data?.message || err.message || 'AI generation failed. Please check your prompt and try again.';
+      alert(message);
+    } finally {
+      setIsAIGenerating(false);
+    }
   };
 
   if (loading) {
@@ -308,8 +344,8 @@ const Room = () => {
               onClick={() => sendRef.current.toggleBoardLock?.(!isBoardLocked)}
               title={isBoardLocked ? 'Unlock canvas for participants' : 'Lock canvas (View-only for participants)'}
               className={`inline-flex items-center gap-1.5 text-xs font-medium border px-2.5 py-1 rounded-full transition ${isBoardLocked
-                  ? 'bg-amber-100 text-amber-800 border-amber-300 hover:bg-amber-200'
-                  : 'bg-slate-100 text-slate-700 border-slate-200 hover:bg-slate-200'
+                ? 'bg-amber-100 text-amber-800 border-amber-300 hover:bg-amber-200'
+                : 'bg-slate-100 text-slate-700 border-slate-200 hover:bg-slate-200'
                 }`}
             >
               {isBoardLocked ? <Lock className="w-3.5 h-3.5 text-amber-600" /> : <Unlock className="w-3.5 h-3.5 text-slate-500" />}
@@ -352,8 +388,8 @@ const Room = () => {
           <button
             onClick={() => setShowChat(!showChat)}
             className={`inline-flex items-center gap-1.5 text-xs font-medium border px-2.5 py-1 rounded-full transition ${showChat
-                ? 'bg-primary-100 text-primary-700 border-primary-200'
-                : 'bg-slate-100 text-slate-600 border-slate-200 hover:bg-slate-200'
+              ? 'bg-primary-100 text-primary-700 border-primary-200'
+              : 'bg-slate-100 text-slate-600 border-slate-200 hover:bg-slate-200'
               }`}
           >
             <MessageSquare className="w-3.5 h-3.5" /> Chat
@@ -447,6 +483,7 @@ const Room = () => {
         <AIPromptBox
           onGenerate={handleAIGenerate}
           onClose={() => setShowAIPrompt(false)}
+          isLoading={isAIGenerating}
         />
       )}
     </div>
