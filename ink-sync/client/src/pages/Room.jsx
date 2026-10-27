@@ -3,17 +3,21 @@ import { useParams, useNavigate, Link } from 'react-router-dom';
 import {
   PenTool, LogOut, Copy, Check, Users, Wifi, WifiOff, Loader2,
   AlertCircle, Hourglass, ShieldX, UserPlus, Crown, Lock, Unlock,
-  MessageSquare, LayoutTemplate, Save, Sparkles
+  MessageSquare, LayoutTemplate, Save, Sparkles, Video
 } from 'lucide-react';
 import { joinRoom } from '../services/roomService';
 import { requestAccess } from '../services/accessService';
 import { useAuth } from '../context/AuthContext';
 import useCanvas from '../hooks/useCanvas';
 import useRoomSocket from '../hooks/useRoomSocket';
+import useWebRTC from '../hooks/useWebRTC';
 import Whiteboard from '../components/canvas/Whiteboard';
 import PendingRequestsPanel from '../components/room/PendingRequestsPanel';
 import ParticipantsPanel from '../components/room/ParticipantsPanel';
 import ChatPanel from '../components/room/ChatPanel';
+import VideoPanel from '../components/room/VideoPanel';
+import ScreenShareOverlay from '../components/room/ScreenShareOverlay';
+import IncomingCallPrompt from '../components/room/IncomingCallPrompt';
 import TemplatesModal from '../components/room/TemplatesModal';
 import ExportMenu from '../components/room/ExportMenu';
 import AIPromptBox from '../components/canvas/AIPromptBox';
@@ -38,6 +42,8 @@ const Room = () => {
   const [showTemplates, setShowTemplates] = useState(false);
   const [showExportMenu, setShowExportMenu] = useState(false);
   const [showAIPrompt, setShowAIPrompt] = useState(false);
+  const [showVideo, setShowVideo] = useState(false);
+  const [autoOpenPreJoin, setAutoOpenPreJoin] = useState(false);
 
   const sendRef = useRef({});
   const canvasRef = useRef(null);
@@ -46,7 +52,15 @@ const Room = () => {
   const {
     connection, accessStatus, participants, pendingRequests,
     isCreator, isBoardLocked, joinError, cursors, messages,
+    videoUsers, hardMutedUserIds, screenShareInfo,
+    incomingCallPrompt, dismissIncomingCall,
   } = useRoomSocket({ roomId, user: { ...user, id: currentUserId }, canvasRef, sendRef });
+
+  const webrtc = useWebRTC({
+    roomId,
+    userId: currentUserId,
+    userName: user?.name || 'Anonymous',
+  });
 
   const isReadOnly = isBoardLocked && !isCreator;
 
@@ -395,6 +409,50 @@ const Room = () => {
             <MessageSquare className="w-3.5 h-3.5" /> Chat
           </button>
 
+          {/* Video Call Button — Adapts between Start Call, Join Call, and In Call */}
+          {webrtc.isInCall ? (
+            <button
+              onClick={() => setShowVideo(!showVideo)}
+              className="inline-flex items-center gap-1.5 text-xs font-medium border px-3 py-1 rounded-full transition bg-indigo-100 text-indigo-700 border-indigo-200 hover:bg-indigo-200"
+              title="Toggle Video Panel"
+            >
+              <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
+              <Video className="w-3.5 h-3.5" /> In Call
+            </button>
+          ) : ((videoUsers || []).filter(id => id !== currentUserId).length > 0 || (videoUsers && videoUsers.length > 0)) ? (
+            <button
+              onClick={() => {
+                setShowVideo(true);
+                setAutoOpenPreJoin(true);
+              }}
+              className="inline-flex items-center gap-1.5 text-xs font-semibold border px-3 py-1 rounded-full transition bg-emerald-50 text-emerald-700 border-emerald-300 hover:bg-emerald-100 shadow-sm animate-pulse"
+              title="Join Active Video Call"
+            >
+              <span className="flex h-2 w-2 relative">
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />
+                <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500" />
+              </span>
+              <Video className="w-3.5 h-3.5" /> Join Call
+              <span className="bg-emerald-600 text-white text-[10px] font-bold rounded-full px-1.5 py-0.2">
+                {(videoUsers || []).filter(id => id !== currentUserId).length || videoUsers.length}
+              </span>
+            </button>
+          ) : (
+            <button
+              onClick={() => {
+                setShowVideo(true);
+                setAutoOpenPreJoin(true);
+              }}
+              className={`inline-flex items-center gap-1.5 text-xs font-medium border px-3 py-1 rounded-full transition ${showVideo
+                ? 'bg-indigo-100 text-indigo-700 border-indigo-200'
+                : 'bg-slate-100 text-slate-700 border-slate-200 hover:bg-indigo-50 hover:text-indigo-600 hover:border-indigo-200'
+                }`}
+              title="Start Video Call"
+            >
+              <Video className="w-3.5 h-3.5 text-indigo-500" /> Start Call
+            </button>
+          )}
+
           <button onClick={() => setShowParticipants(!showParticipants)}
             className="inline-flex items-center gap-1.5 text-xs font-medium bg-slate-100 text-slate-600 border border-slate-200 px-2.5 py-1 rounded-full hover:bg-slate-200 transition"
             title="Participants">
@@ -452,7 +510,54 @@ const Room = () => {
             onClose={() => setShowChat(false)}
           />
         )}
+
+        {showVideo && (
+          <VideoPanel
+            webrtc={webrtc}
+            participants={participants}
+            currentUserId={currentUserId}
+            isCreator={isCreator}
+            hardMutedUserIds={hardMutedUserIds}
+            videoUsers={videoUsers}
+            initialOpenPreJoin={autoOpenPreJoin}
+            onClose={() => {
+              setShowVideo(false);
+              setAutoOpenPreJoin(false);
+            }}
+            onStartCall={() => sendRef.current.startVideoCall?.()}
+            onHardMute={(targetUserId) => sendRef.current.hardMuteUser?.(targetUserId)}
+            onUnmuteAllow={(targetUserId) => sendRef.current.unmuteAllowUser?.(targetUserId)}
+          />
+        )}
       </main>
+
+      {/* Floating Incoming Video Call Invitation Prompt */}
+      {incomingCallPrompt && !webrtc.isInCall && (
+        <IncomingCallPrompt
+          initiatorName={incomingCallPrompt.initiatorName}
+          onJoin={() => {
+            dismissIncomingCall();
+            setShowVideo(true);
+            setAutoOpenPreJoin(true);
+          }}
+          onDismiss={dismissIncomingCall}
+        />
+      )}
+
+      {/* Screen Share Floating Window (Draggable & Resizable) */}
+      {(webrtc.isScreenSharing || webrtc.remoteScreenStream) && (
+        <ScreenShareOverlay
+          stream={webrtc.isScreenSharing ? webrtc.screenStream : webrtc.remoteScreenStream}
+          sharerName={webrtc.isScreenSharing ? 'You' : (screenShareInfo?.userName || webrtc.screenShareUser?.userName || 'Participant')}
+          isLocal={webrtc.isScreenSharing}
+          onStop={webrtc.stopScreenShare}
+          onClose={() => {
+            if (webrtc.isScreenSharing) {
+              webrtc.stopScreenShare();
+            }
+          }}
+        />
+      )}
 
       {/* OVERLAYS */}
       {isCreator && showRequests && (

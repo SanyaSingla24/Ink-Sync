@@ -11,6 +11,13 @@ const useRoomSocket = ({ roomId, user, canvas, canvasRef: externalCanvasRef, sen
   const [joinError, setJoinError] = useState('');
   const [cursors, setCursors] = useState({}); // userId -> { x, y, userName }
   const [messages, setMessages] = useState([]);
+
+  // Video call state
+  const [videoUsers, setVideoUsers] = useState([]); // userIds currently in video call
+  const [hardMutedUserIds, setHardMutedUserIds] = useState([]); // userIds hard-muted by creator
+  const [screenShareInfo, setScreenShareInfo] = useState(null); // { userId, userName } or null
+  const [incomingCallPrompt, setIncomingCallPrompt] = useState(null); // { initiatorId, initiatorName, timestamp } or null
+
   const internalCanvasRef = useRef(canvas);
   internalCanvasRef.current = canvas;
 
@@ -37,6 +44,10 @@ const useRoomSocket = ({ roomId, user, canvas, canvasRef: externalCanvasRef, sen
       removeUser: (targetUserId) => socket.emit('remove-user', { roomId, targetUserId }),
       sendMessage: (message, recipientId) => socket.emit('chat:send', { roomId, userId: user.id, message, recipientId }),
       deleteMessage: (messageId) => socket.emit('chat:delete', { roomId, messageId }),
+      // Video call actions
+      startVideoCall: () => socket.emit('video:start-call', { roomId, initiatorId: user.id, initiatorName: user.name }),
+      hardMuteUser: (targetUserId) => socket.emit('video:hard-mute', { roomId, targetUserId }),
+      unmuteAllowUser: (targetUserId) => socket.emit('video:unmute-allow', { roomId, targetUserId }),
     };
 
     const joinAndSync = () => {
@@ -59,10 +70,13 @@ const useRoomSocket = ({ roomId, user, canvas, canvasRef: externalCanvasRef, sen
       setJoinError(message);
       setAccessStatus(status || 'denied');
     };
-    const onRoomJoined = ({ participants: pList, isCreator: isC, isLocked }) => {
+    const onRoomJoined = ({ participants: pList, isCreator: isC, isLocked, videoUsers: vUsers, hardMuted, screenShare }) => {
       setParticipants(pList || []);
       if (isC !== undefined) setIsCreator(isC);
       if (isLocked !== undefined) setIsBoardLocked(isLocked);
+      if (vUsers) setVideoUsers(vUsers);
+      if (hardMuted) setHardMutedUserIds(hardMuted);
+      if (screenShare) setScreenShareInfo(screenShare);
       setAccessStatus('approved');
       socket.emit('board:sync-request', { roomId });
     };
@@ -104,6 +118,31 @@ const useRoomSocket = ({ roomId, user, canvas, canvasRef: externalCanvasRef, sen
       setCursors(prev => ({ ...prev, [userId]: { userName, x, y, lastUpdate: Date.now() } }));
     };
 
+    // Video call events
+    const onVideoUserJoined = ({ videoUsers: vUsers }) => {
+      if (vUsers) setVideoUsers(vUsers);
+    };
+    const onVideoUserLeft = ({ videoUsers: vUsers }) => {
+      if (vUsers) setVideoUsers(vUsers);
+    };
+    const onParticipantHardMuted = ({ targetUserId }) => {
+      setHardMutedUserIds(prev => prev.includes(targetUserId) ? prev : [...prev, targetUserId]);
+    };
+    const onParticipantUnmuteAllowed = ({ targetUserId }) => {
+      setHardMutedUserIds(prev => prev.filter(id => id !== targetUserId));
+    };
+    const onScreenShareStarted = ({ userId: uid, userName: uname }) => {
+      setScreenShareInfo({ userId: uid, userName: uname });
+    };
+    const onScreenShareStopped = () => {
+      setScreenShareInfo(null);
+    };
+    const onCallStartedPrompt = (data) => {
+      if (data?.initiatorId !== user.id) {
+        setIncomingCallPrompt(data);
+      }
+    };
+
     socket.on('connect', onConnect);
     socket.on('disconnect', onDisconnect);
     socket.on('room-join-error', onJoinError);
@@ -127,6 +166,15 @@ const useRoomSocket = ({ roomId, user, canvas, canvasRef: externalCanvasRef, sen
     socket.on('board:reorder', onReorder);
     socket.on('cursor:move', onCursorMove);
     socket.on('chat:message', onChatMessage);
+
+    // Video call event listeners
+    socket.on('video:call-started-prompt', onCallStartedPrompt);
+    socket.on('video:user-joined', onVideoUserJoined);
+    socket.on('video:user-left', onVideoUserLeft);
+    socket.on('video:participant-hard-muted', onParticipantHardMuted);
+    socket.on('video:participant-unmute-allowed', onParticipantUnmuteAllowed);
+    socket.on('video:screen-share-started', onScreenShareStarted);
+    socket.on('video:screen-share-stopped', onScreenShareStopped);
 
     if (socket.connected) onConnect();
     else socket.connect();
@@ -168,6 +216,14 @@ const useRoomSocket = ({ roomId, user, canvas, canvasRef: externalCanvasRef, sen
       socket.off('cursor:move', onCursorMove);
       socket.off('chat:message', onChatMessage);
        socket.off('chat:deleted', onChatDeleted);
+      // Video call cleanup
+      socket.off('video:call-started-prompt', onCallStartedPrompt);
+      socket.off('video:user-joined', onVideoUserJoined);
+      socket.off('video:user-left', onVideoUserLeft);
+      socket.off('video:participant-hard-muted', onParticipantHardMuted);
+      socket.off('video:participant-unmute-allowed', onParticipantUnmuteAllowed);
+      socket.off('video:screen-share-started', onScreenShareStarted);
+      socket.off('video:screen-share-stopped', onScreenShareStopped);
     };
   }, [roomId, user.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -181,7 +237,13 @@ const useRoomSocket = ({ roomId, user, canvas, canvasRef: externalCanvasRef, sen
     joinError,
     cursors,
     messages,
+    // Video call state
+    videoUsers,
+    hardMutedUserIds,
+    screenShareInfo,
+    incomingCallPrompt,
+    dismissIncomingCall: () => setIncomingCallPrompt(null),
   };
 };
 
-export default useRoomSocket;
+export default useRoomSocket;
